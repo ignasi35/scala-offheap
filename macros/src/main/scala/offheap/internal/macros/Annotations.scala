@@ -1,4 +1,4 @@
-package offheap
+package scala.offheap
 package internal
 package macros
 
@@ -9,25 +9,39 @@ class Annotations(val c: whitebox.Context) extends Common {
   import c.universe.definitions._
   import Flag._
 
-  val Ref    = if (checked) tq"$RefClass"    else tq"$AddrTpe"
-  val Memory = if (checked) tq"$MemoryClass" else q"$NativeMemoryClass"
-
-  def layout(fields: List[SyntacticField]): Tree = {
-    val tuples = fields.map { f =>
-      q"(${f.name.toString}, new $TagClass[${f.tpt}]())"
-    }
-    q"new $LayoutClass(..$tuples)"
-  }
-
   implicit class SyntacticField(vd: ValDef) {
-    def name        = vd.name
-    def tpt         = vd.tpt
-    def default     = vd.rhs
-    def isMutable   = vd.mods.hasFlag(MUTABLE)
-    def isCtorField = vd.mods.hasFlag(PARAMACCESSOR)
+    def name         = vd.name
+    def tpt          = vd.tpt
+    def default      = vd.rhs
+    def mods         = vd.mods
+    def isMutable    = vd.mods.hasFlag(MUTABLE)
+    def inCtor       = vd.mods.hasFlag(PARAMACCESSOR)
+    def inBody       = !inCtor
+    def accessorMods = {
+      val flags =
+        if (inCtor && mods.hasFlag(PRIVATE) && mods.hasFlag(LOCAL))
+          mods.flags & IMPLICIT
+        else
+          mods.flags & (PRIVATE | LOCAL | PROTECTED | IMPLICIT)
+      Modifiers(flags, mods.privateWithin)
+    }
+    def assignerMods =
+      Modifiers(accessorMods.flags & (PRIVATE | PROTECTED | LOCAL),
+                accessorMods.privateWithin)
   }
 
-  // TODO: modifiers propagation and checking
+  val reservedNames = {
+    (1 to 64).map { i => TermName(s"_$i") } ++
+    Seq("addr", "isEmpty", "nonEmpty", "get", "copy", "is", "as",
+        "!=", "##", "==", "asInstanceOf", "equals", "hashCode",
+        "isInstanceOf", "toString").map(TermName(_)) ++
+    Seq(complete, initializer, tag)
+  }.toSet
+
+  def assertNotReserved(name: TermName, at: Position = c.macroApplication.pos) =
+    if (reservedNames.contains(name.decoded))
+      abort(s"name ${name.decoded} is reserved and may not be used", at)
+
   // TODO: hygienic reference to class type from companion?
   def dataTransform(clazz: Tree, companion: Tree) = {
     // Parse the input trees
@@ -55,22 +69,36 @@ class Annotations(val c: whitebox.Context) extends Common {
     if (rawRestArgs.nonEmpty)
       abort("data classes may not have more than one argument list",
             at = rawRestArgs.head.head.pos)
+    if (rawArgs.length > 64)
+      abort("data classes may not have more than 64 constructor arguments")
     rawArgs.headOption.foreach { arg =>
       if (arg.mods.hasFlag(IMPLICIT))
         abort("data classes may not have implicit arguments", at = arg.pos)
     }
     rawTraits.foreach {
-      case q"${tq"$ref[..$targs]"}(...$args)" =>
+      case q"${tq"$_[..$targs]"}(...$args)" =>
         if (args.nonEmpty || targs.nonEmpty)
           abort("data classes can only inherit from universal traits")
-        ref
+    }
+    rawArgs.foreach {
+      case vd: ValDef =>
+        assertNotReserved(vd.name, at = vd.pos)
+    }
+    rawStats.foreach {
+      case md: MemberDef =>
+        md.name match {
+          case name: TermName =>
+            assertNotReserved(name, at = md.pos)
+          case _ =>
+        }
+      case _ =>
     }
 
     // Generate fresh names used in desugaring
-    val memory       = fresh("memory")
-    val instance     = fresh("instance")
-    val scrutinee    = fresh("scrutinee")
-    val value        = fresh("value")
+    val alloc     = fresh("alloc")
+    val instance  = fresh("instance")
+    val scrutinee = fresh("scrutinee")
+    val value     = fresh("value")
 
     // Process and existing members
     val termName = name.toTermName
@@ -79,13 +107,26 @@ class Annotations(val c: whitebox.Context) extends Common {
       case other                                                => other
     }
     val parents = rawMods.annotations.collect {
-      case q"new $annot(new $_[$tpt]())" if annot.symbol == ParentClass =>
+      case q"new $annot(${m: RefTree}.classOf[$tpt])" if annot.symbol == ParentClass =>
         tpt
     }
     val tagOpt = rawMods.annotations.collectFirst {
       case q"new $annot($value: $tpt)" if annot.symbol == ClassTagClass =>
         (value, tpt)
     }
+    val groupedStats = rawStats.groupBy {
+      case _: ValDef     => 'val
+      case _: TypeDef    => 'type
+      case _: DefDef     => 'def
+      case s if s.isTerm => 'term
+      case _             => 'other
+    }
+    groupedStats.get('other).map { other =>
+      abort("data class body may not contain such body statements", at = other.head.pos)
+    }
+    val valStats  = groupedStats.get('val).getOrElse(Nil)
+    val types     = groupedStats.get('type).getOrElse(Nil)
+    val methods   = groupedStats.get('def).getOrElse(Nil)
     val fields = {
       val tagField = tagOpt.map {
         case (value, tpt) => new SyntacticField(q"val $tag: $tpt")
@@ -93,12 +134,14 @@ class Annotations(val c: whitebox.Context) extends Common {
       def checkMods(mods: Modifiers) =
         if (mods.hasFlag(LAZY))
           abort("data classes may not have lazy fields")
+        else if (mods.hasFlag(FINAL))
+          abort("data classes may not have final fields")
       val argFields = rawArgs.collect {
         case vd @ ValDef(mods, _, _, _) =>
           checkMods(mods)
           new SyntacticField(vd)
       }
-      val bodyFields = rawStats.collect {
+      val bodyFields = valStats.collect {
         case vd @ ValDef(mods, _, tpt, _) =>
           if (tpt.isEmpty)
             abort("Fields of data classes must have explicitly annotated types.",
@@ -108,29 +151,40 @@ class Annotations(val c: whitebox.Context) extends Common {
       }
       tagField ++ argFields ++ bodyFields
     }
-    val init = rawStats.collect {
-      case t if t.isTerm               => t
-      case ValDef(_, vname, tpt, value) =>
-        q"$MethodModule.assigner[$name, $tpt]($ref, ${vname.toString}, $value)"
+    val initStats = rawStats.collect {
+      case t if t.isTerm => t
+      case ValDef(mods, vname, tpt, value) if !mods.hasFlag(DEFAULTINIT) =>
+        q"$MethodModule.assign[$name, $tpt](this, ${vname.toString}, $value)"
     }
-    val methods = rawStats.collect { case t: DefDef => t }
-    val types = rawStats.collect { case t: TypeDef => t }
 
     // Generate additional members
+    var prev = q""
     val accessors = fields.flatMap { f =>
+      val ctorAnnot =
+        if (f.inCtor) q"new $CtorClass"
+        else q""
+      val props =
+        prev :: q"new $AnnotsClass(..$ctorAnnot, ..${f.mods.annotations})" :: Nil
+      val annot: Tree =
+        q"""
+          new $FieldClass[${f.tpt}](${f.name.toString}, ..$props,
+                                    $LayoutModule.field[$name, ${f.tpt}](..$props))
+        """
+      prev = q"this.${f.name}"
+      val accessorMods = f.accessorMods.mapAnnotations(_ => List(annot))
       val accessor = q"""
-        def ${f.name}: ${f.tpt} =
-          $MethodModule.accessor[$name, ${f.tpt}]($ref, ${f.name.toString})
+        $accessorMods def ${f.name}: ${f.tpt} =
+          $MethodModule.access[$name, ${f.tpt}](this, ${f.name.toString})
       """
       val assignerName = TermName(f.name.toString + "_$eq")
       val assigner = q"""
-        def $assignerName($value: ${f.tpt}): Unit =
-          $MethodModule.assigner[$name, ${f.tpt}]($ref, ${f.name.toString}, $value)
+        ${f.assignerMods} def $assignerName($value: ${f.tpt}): Unit =
+          $MethodModule.assign[$name, ${f.tpt}](this, ${f.name.toString}, $value)
       """
       if (!f.isMutable) accessor :: Nil
       else accessor :: assigner :: Nil
     }
-    val argNames = fields.collect { case f if f.isCtorField => f.name }
+    val argNames = fields.collect { case f if f.inCtor => f.name }
     val _ns = argNames.zipWithIndex.map {
       case (argName, i) =>
         val _n = TermName("_" + (i + 1))
@@ -141,13 +195,15 @@ class Annotations(val c: whitebox.Context) extends Common {
       case head :: Nil  => q"this.$head"
       case head :: tail => q"this"
     }
-    val copyArgs = fields.collect { case f if f.isCtorField =>
+    val copyArgs = fields.collect { case f if f.inCtor =>
       q"val ${f.name}: ${f.tpt} = this.${f.name}"
     }
-    val initializer = if (init.isEmpty) q"" else q"def $initialize = { ..$init }"
-    val args = fields.collect { case f if f.isCtorField =>
-      q"val ${f.name}: ${f.tpt} = ${f.default}"
+    val init = if (initStats.isEmpty) q"" else q"def $initializer = { ..$initStats; this }"
+    val applyArgs = fields.filter(_.inCtor).zipWithIndex.map { case (f, i) =>
+      val name = TermName("_" + (i + 1))
+      q"val $name: ${f.tpt} = ${f.default}"
     }
+    val applyName = TermName("apply" + applyArgs.length)
     val unapplyTpt = if (argNames.isEmpty) tq"$BooleanClass" else tq"$name"
     val unapplyEmpty = if (argNames.isEmpty) q"false" else q"$termName.empty"
 
@@ -165,7 +221,7 @@ class Annotations(val c: whitebox.Context) extends Common {
       val isC = q"$scrutinee.is[$name]"
       val asC = q"$scrutinee.as[$name]"
       val body =
-        if (fields.filter(_.isCtorField).isEmpty) isC
+        if (fields.filter(_.inCtor).isEmpty) isC
         else q"if ($isC) $termName.${primaryExtractor.name}.unapply($asC) else $termName.empty"
       q"""
         object $extractor {
@@ -192,30 +248,35 @@ class Annotations(val c: whitebox.Context) extends Common {
       q"new $PrimaryExtractorClass($termName.${primaryExtractor.name})" ::
       q"new $UniversalExtractorClass($termName.${universalExtractor.name})" ::
       parents.zip(parentExtractors).map { case (p, u) =>
-        q"new $ParentExtractorClass(new $TagClass[$p], $termName.${u.name})"
+        q"new $ParentExtractorClass(${classOf(p)}, $termName.${u.name})"
       }
     val mods = Modifiers(
       (rawMods.flags.asInstanceOf[Long] & Flag.FINAL.asInstanceOf[Long]).asInstanceOf[FlagSet],
       rawMods.privateWithin,
-      q"new $DataClass" :: layout(fields) :: extractorAnnots ::: rawMods.annotations
+      q"new $DataClass" ::
+      extractorAnnots ::: rawMods.annotations
     )
+    val completeAnnot = q"new $CompleteClass($LayoutModule.markComplete[$name])"
 
     q"""
       $mods class $name private (
-        private val $ref: $Ref
+        val addr: $AddrTpe
       ) extends $AnyValClass with ..$traits { $rawSelf =>
         import scala.language.experimental.{macros => $canUseMacros}
 
-        ..$initializer
         ..$accessors
+        ..$init
 
-        def isEmpty  = ${isNull(q"$ref")}
-        def nonEmpty = ${notNull(q"$ref")}
+        @$completeAnnot
+        def $complete: $UnitClass = ()
+
+        def isEmpty  = ${isNull(q"this.addr")}
+        def nonEmpty = ${notNull(q"this.addr")}
         def get      = $getBody
         ..${_ns}
 
-        def copy(..$copyArgs)(implicit $memory: $Memory): $name =
-          $termName.apply(..$argNames)($memory)
+        def copy(..$copyArgs)(implicit $alloc: $AllocatorClass): $name =
+          $termName.apply(..$argNames)($alloc)
         override def toString(): $StringClass =
           $MethodModule.toString[$name](this)
 
@@ -230,11 +291,10 @@ class Annotations(val c: whitebox.Context) extends Common {
                      with ..$companionParents { $companionSelf =>
         import scala.language.experimental.{macros => $canUseMacros}
 
-        val empty: $name                  = null.asInstanceOf[$name]
-        def fromRef($ref: $Ref): $name    = new $name($ref)
-        def toRef($instance: $name): $Ref = $instance.$ref
-        def apply(..$args)(implicit $memory: $Memory): $name =
-          $MethodModule.allocator[$name]($memory, ..$argNames)
+        val empty: $name                       = null.asInstanceOf[$name]
+        def fromAddr(addr: $AddrTpe): $name    = new $name(addr)
+        def apply(..$applyArgs)(implicit alloc: $AllocatorClass): $name =
+          macro $internal.macros.Allocate.$applyName[$name]
         def unapply(scrutinee: $AnyClass): $unapplyTpt =
           macro $internal.macros.WhiteboxMethod.unapply[$name]
 
@@ -253,7 +313,7 @@ class Annotations(val c: whitebox.Context) extends Common {
     case (clazz: ClassDef) :: (companion: ModuleDef) :: Nil =>
       dataTransform(clazz, companion)
     case _ =>
-      abort("@data anottation only works on classes")
+      abort("@data annotation only works on classes")
   }
 
   def countClasses(stats: List[Tree]): Int = stats.map {
@@ -288,15 +348,20 @@ class Annotations(val c: whitebox.Context) extends Common {
       case tq"$pkg.AnyRef" :: Nil if pkg.symbol == ScalaPackage =>
       case _ => abort("enum classes may not inherit from other classes", at = classParents.head.pos)
     }
-    if (classStats.nonEmpty)
-      abort("enum classes may not have body statements", at = classStats.head.pos)
 
     // Generate some fresh names
     val instance = fresh("instance")
     val coerce   = fresh("coerce")
 
     // Member and annotation transformation
-    val groupedAnns = rawMods.annotations.groupBy {
+    val methods = classStats.map {
+      case dd: DefDef =>
+        assertNotReserved(dd.name, at = dd.pos)
+        dd
+      case t =>
+        abort("enum class body may only contain methods", at = t.pos)
+    }
+    val groupedAnnots = rawMods.annotations.groupBy {
       case q"new $ann[..$_](...$_)" =>
         ann.symbol match {
           case ParentClass        => 'parent
@@ -304,9 +369,9 @@ class Annotations(val c: whitebox.Context) extends Common {
           case _                  => 'rest
         }
     }
-    val parents    = groupedAnns.get('parent).getOrElse(Nil)
-    val rangeOpt   = groupedAnns.get('range).map(_.head)
-    val moduleMods = rawMods.mapAnnotations { _ => groupedAnns.get('rest).getOrElse(Nil) }
+    val parentAnnots  = groupedAnnots.get('parent).getOrElse(Nil)
+    val rangeAnnotOpt = groupedAnnots.get('range).map(_.head)
+    val moduleMods    = rawMods.mapAnnotations { _ => groupedAnnots.get('rest).getOrElse(Nil) }
 
     val total = countClasses(rawStats)
     def const(value: Int) =
@@ -317,56 +382,67 @@ class Annotations(val c: whitebox.Context) extends Common {
       else
         q"$value: $IntClass"
 
-    var count: Int = 0
+    var count = 0
+    var children = List.empty[Tree]
     def parentAnnot =
-      q"new $ParentClass(new $TagClass[$name]())"
+      q"new $ParentClass(${classOf(tq"$name")})"
     def classTagAnnot =
       q"new $ClassTagClass(${const(count)})"
     def classTagRangeAnnot(start: Int) =
       q"new $ClassTagRangeClass(${const(start)}, ${const(count)})"
-    def transformStats(stats: List[Tree]): List[Tree] = stats.map {
+    def transformStats(pre: Tree, stats: List[Tree]): List[Tree] = stats.map {
       case c: ClassDef =>
         count += 1
+        children ::= tq"$pre.${c.name}"
         val mods = c.mods.mapAnnotations { anns =>
-          if (parents.nonEmpty) parentAnnot :: anns
+          if (parentAnnots.nonEmpty) parentAnnot :: anns
           else parentAnnot :: classTagAnnot :: anns
         }
         treeCopy.ClassDef(c, mods, c.name, c.tparams, c.impl)
       case m: ModuleDef =>
         val start = count
         val impl = treeCopy.Template(m.impl, m.impl.parents, m.impl.self,
-                                     transformStats(m.impl.body))
+                                     transformStats(q"$pre.${m.name}", m.impl.body))
         val mods = m.mods.mapAnnotations { anns =>
-          if (parents.nonEmpty) parentAnnot :: anns
+          if (parentAnnots.nonEmpty) parentAnnot :: anns
           else parentAnnot :: classTagRangeAnnot(start) :: anns
         }
         treeCopy.ModuleDef(m, mods, m.name, impl)
       case other =>
         other
     }
-    val stats = transformStats(rawStats)
+    val stats = transformStats(q"$termName", rawStats)
 
-    val range =
-      if (parents.nonEmpty) rangeOpt.get
+    val childrenTypes  = children.map { c => q"$PredefModule.classOf[$c]" }
+    val childrenAnnot  = q"new $PotentialChildrenClass(..$childrenTypes)"
+    val rangeAnnot =
+      if (parentAnnots.nonEmpty) rangeAnnotOpt.get
       else q"new $ClassTagRangeClass(${const(0)}, ${const(count)})"
     val q"$_: $tagTpt" = const(0)
-    val layt = layout(List(new SyntacticField(q"val $tag: $tagTpt")))
-    val annots = q"new $EnumClass" :: layt :: range :: parents
+    val annots         = q"new $EnumClass" :: rangeAnnot ::
+                         childrenAnnot :: parentAnnots
+
+    val tagprops = q"" :: q"new $AnnotsClass()" :: Nil
 
     q"""
       @..$annots final class $name private(
-        private val $ref: $Ref
+        val addr: $AddrTpe
       ) extends $AnyValClass {
         import scala.language.experimental.{macros => $canUseMacros}
-        def $tag: $tagTpt        = $MethodModule.accessor[$name, $tagTpt]($ref, ${tag.toString})
-        def is[T]: $BooleanClass = macro $internal.macros.Method.is[$name, T]
-        def as[T]: T             = macro $internal.macros.Method.as[$name, T]
+
+        @$FieldClass[$tagTpt](
+          ${tag.toString}, ..$tagprops,
+          $LayoutModule.field[$name, $tagTpt](..$tagprops))
+        def $tag: $tagTpt         = $MethodModule.access[$name, $tagTpt](this, ${tag.toString})
+        def is[T]: $BooleanClass  = macro $internal.macros.Method.is[$name, T]
+        def as[T]: T              = macro $internal.macros.Method.as[$name, T]
+
+        ..$methods
       }
       $moduleMods object $termName extends { ..$rawEarly } with ..$rawParents { $rawSelf =>
         import scala.language.experimental.{macros => $canUseMacros}
         val empty: $name                     = null.asInstanceOf[$name]
-        def fromRef($ref: $Ref): $name       = new $name($ref)
-        def toRef($instance: $name): $Ref    = $instance.$ref
+        def fromAddr(addr: $AddrTpe): $name  = new $name(addr)
         implicit def $coerce[T](t: T): $name =
           macro $internal.macros.WhiteboxMethod.coerce[$name, T]
         ..$stats
@@ -382,6 +458,6 @@ class Annotations(val c: whitebox.Context) extends Common {
     case (module: ModuleDef) :: Nil =>
       enumTransform(q"class ${module.name.toTypeName}", module)
     case _ =>
-      abort("@enum anottation only works on objects and classes")
+      abort("@enum annotation only works on objects and classes")
   }
 }

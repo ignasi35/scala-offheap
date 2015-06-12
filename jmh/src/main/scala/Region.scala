@@ -1,11 +1,12 @@
-package offheap.test.jmh
+package jmh
 
 import org.openjdk.jmh.annotations._
-import offheap.x64._
+import org.openjdk.jmh.infra._
+import offheap._
 
 @State(Scope.Thread)
 class RegionClose {
-  implicit val pool: Pool = Pool(UnsafeMemory())
+  implicit val props = Region.Props()
   var r: Region = _
 
   @Param(scala.Array("1024", "2048", "4096"))
@@ -15,7 +16,7 @@ class RegionClose {
   def setup(): Unit = {
     r = Region.open
     for (_ <- 1 to allocatedPages)
-      r.allocate(pool.pageSize)
+      r.allocate(props.pool.pageSize)
   }
 
   @Benchmark
@@ -24,7 +25,7 @@ class RegionClose {
 
 @State(Scope.Thread)
 class RegionOpen {
-  implicit val pool: Pool = NativePool(UnsafeMemory())
+  implicit val props = Region.Props()
   var r: Region = _
 
   @TearDown(Level.Invocation)
@@ -39,7 +40,7 @@ class RegionOpen {
 
 @State(Scope.Thread)
 class RegionAllocateCurrent {
-  implicit val pool: Pool = Pool(UnsafeMemory())
+  implicit val props = Region.Props()
   var r: Region = _
 
   @Setup(Level.Invocation)
@@ -55,13 +56,13 @@ class RegionAllocateCurrent {
 
 @State(Scope.Thread)
 class RegionAllocateNext {
-  implicit val pool: Pool = Pool(UnsafeMemory())
+  implicit val props = Region.Props()
   var r: Region = _
 
   @Setup(Level.Invocation)
   def setup(): Unit = {
     r = Region.open
-    r.allocate(pool.pageSize)
+    r.allocate(props.pool.pageSize)
   }
 
   @TearDown(Level.Invocation)

@@ -1,0 +1,16 @@
+language: scala
+scala:
+  - 2.11.6
+script:
+  - sbt ++$TRAVIS_SCALA_VERSION "tests/test" "jmh/compile" "root/publishOnlyWhenOnMaster"
+jdk:
+  - openjdk6
+  - openjdk7
+  - oraclejdk7
+  - oraclejdk8
+env:
+  global:
+   - MAVEN_REALM="Sonatype Nexus Repository Manager"
+   - MAVEN_DOMAIN="oss.sonatype.org"
+   - secure: "MXedntUx9ssnfbfeXY9GVMdhnf/u2Cz50qBGUbSgEKiXxwBsNz4qF+JQDQI6eIE+WmaiXi9xoFyoSZaKEXF7fiGSkdX+FkPlcNOpectED78/ZBbSbGiueynE6HP8oX8gXetSYHOeWZx4Gu2WtgqZ09q44F9LiU9C3x/3YsSVIs8="
+   - secure: "fzkOBLnjHu5NZN5IcBm5TA/Z8wKHuJK5+YsLChgbFcKkhLBqeJsXj2AedugM3loLEu0Ty0ASSB5mneGj2cwcA03CCNNHj4AjrKfoGcxH53B/KXmgHwDV1jfw5ng6IeZZAB30dKdBwIINFkkeHQiZ5N42T3ssu5o6oEAwVZOZhQw="

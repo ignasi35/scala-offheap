@@ -1,72 +1,82 @@
-package offheap.test.jmh
+package jmh
 
 import org.openjdk.jmh.annotations._
-import offheap.x64._
+import offheap._
+
+class JByteCell(var v: Byte)
+class JShortCell(var v: Short)
+class JIntCell(var v: Int)
+class JLongCell(var v: Long)
+
+@data class ByteCell(var v: Byte)
+@data class ShortCell(var v: Short)
+@data class IntCell(var v: Int)
+@data class LongCell(var v: Long)
 
 @State(Scope.Thread)
 class Access {
-  implicit val pool: Pool = Pool(UnsafeMemory())
-  var r: Region = _
-  var op1: OffheapPoint1 = _
-  var op2: OffheapPoint2 = _
-  var op4: OffheapPoint4 = _
-  var p1: Point1 = _
-  var p2: Point2 = _
-  var p4: Point4 = _
+  implicit val alloc = malloc
 
-  @Setup(Level.Trial)
-  def setup(): Unit = {
-    r = Region.open
-    op1 = OffheapPoint1(10)(r)
-    op2 = OffheapPoint2(10, 20)(r)
-    op4 = OffheapPoint4(10, 20, 30, 40)(r)
-    p1 = new Point1(10)
-    p2 = new Point2(10, 20)
-    p4 = new Point4(10, 20, 30, 40)
-  }
+  val byte  = ByteCell(0.toByte)
+  val short = ShortCell(0.toShort)
+  val int   = IntCell(0)
+  val long  = LongCell(0L)
 
-  @TearDown(Level.Trial)
-  def tearDown(): Unit = r.close
+  val byte42 = 42.toByte
+  val short42 = 42.toShort
+  val int42 = 42
+  val long42 = 42L
 
   @Benchmark
-  def offheapPoint1Field1()= op1.a
+  def offheapReadByte = byte.v
 
   @Benchmark
-  def offheapPoint2Field1()= op2.a
+  def offheapReadShort = short.v
 
   @Benchmark
-  def offheapPoint2Field2()= op2.b
+  def offheapReadInt = int.v
 
   @Benchmark
-  def offheapPoint4Field1()= op4.a
+  def offheapReadLong = long.v
 
   @Benchmark
-  def offheapPoint4Field2()= op4.b
+  def offheapWriteByte = { byte.v = byte42; byte42 }
 
   @Benchmark
-  def offheapPoint4Field3()= op4.c
+  def offheapWriteShort = { short.v = short42; short42 }
 
   @Benchmark
-  def offheapPoint4Field4()= op4.d
+  def offheapWriteInt = { int.v = int42; int42 }
 
   @Benchmark
-  def point1Field1() = p1.a
+  def offheapWriteLong = { long.v = long42; long42 }
+
+  val jbyte  = new JByteCell(0.toByte)
+  val jshort = new JShortCell(0.toShort)
+  val jint   = new JIntCell(0)
+  val jlong  = new JLongCell(0L)
 
   @Benchmark
-  def point2Field1() = p2.a
+  def onheapReadByte = jbyte.v
 
   @Benchmark
-  def point2Field2() = p2.b
+  def onheapReadShort = jshort.v
 
   @Benchmark
-  def point4Field1() = p4.a
+  def onheapReadInt = jint.v
 
   @Benchmark
-  def point4Field2() = p4.b
+  def onheapReadLong = jlong.v
 
   @Benchmark
-  def point4Field3() = p4.c
+  def onheapWriteByte = { jbyte.v = byte42; byte42 }
 
   @Benchmark
-  def point4Field4() = p4.d
+  def onheapWriteShort = { jshort.v = short42; short42 }
+
+  @Benchmark
+  def onheapWriteInt = { jint.v = int42; int42 }
+
+  @Benchmark
+  def onheapWriteLong = { jlong.v = long42; long42 }
 }

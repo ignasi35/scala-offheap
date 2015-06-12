@@ -1,4 +1,4 @@
-package offheap
+package scala.offheap
 package internal
 package macros
 
@@ -11,48 +11,55 @@ trait Definitions {
   import c.universe.definitions._
   import c.universe.rootMirror._
 
-  val bitDepth: Int = 64
-  private val prefix = s"offheap.x$bitDepth"
-  val offheapx  = staticPackage(prefix)
-  val AddrTpe  = LongClass.toType
-  val SizeTpe  = LongClass.toType
-  val checked  = !System.getProperties.containsKey("offheap.unchecked")
+  val StringBuilderClass             = staticClass("scala.collection.mutable.StringBuilder")
+  val NullPointerExceptionClass      = staticClass("java.lang.NullPointerException")
+  val IllegalArgumentExceptionClass  = staticClass("java.lang.IllegalArgumentException")
+  val IndexOutOfBoundsExceptionClass = staticClass("java.lang.IndexOutOfBoundsException")
 
-  def addr(ref: Tree)    = if (checked) q"$ref.addr"    else ref
-  def memory(ref: Tree)  = if (checked) q"$ref.memory"  else q"$internal.Unsafer.unsafe"
-  def isNull(ref: Tree)  = if (checked) q"$ref == null" else q"$ref == 0L"
-  def notNull(ref: Tree) = if (checked) q"$ref != null" else q"$ref != 0L"
+  val RegionClass             = staticClass("scala.offheap.Region")
+  val PoolRegionClass         = staticClass("scala.offheap.PoolRegion")
+  val DirectRegionClass       = staticClass("scala.offheap.DirectRegion")
+  val AllocatorClass          = staticClass("scala.offheap.Allocator")
+  val ArrayClass              = staticClass("scala.offheap.Array")
+  val EmbedArrayClass         = staticClass("scala.offheap.EmbedArray")
+  val EmbedClass              = staticClass("scala.offheap.embed")
+  val DataClass               = staticClass("scala.offheap.internal.Data")
+  val EnumClass               = staticClass("scala.offheap.internal.Enum")
+  val ClassTagClass           = staticClass("scala.offheap.internal.ClassTag")
+  val ClassTagRangeClass      = staticClass("scala.offheap.internal.ClassTagRange")
+  val PotentialChildrenClass  = staticClass("scala.offheap.internal.PotentialChildren")
+  val ParentClass             = staticClass("scala.offheap.internal.Parent")
+  val PrimaryExtractorClass   = staticClass("scala.offheap.internal.PrimaryExtractor")
+  val ParentExtractorClass    = staticClass("scala.offheap.internal.ParentExractor")
+  val UniversalExtractorClass = staticClass("scala.offheap.internal.UniversalExtractor")
+  val FieldClass              = staticClass("scala.offheap.internal.Field")
+  val AnnotsClass             = staticClass("scala.offheap.internal.Annots")
+  val CompleteClass           = staticClass("scala.offheap.internal.Complete")
+  val CtorClass               = staticClass("scala.offheap.internal.Ctor")
 
-  val StringBuilderClass            = staticClass("scala.collection.mutable.StringBuilder")
-  val NullPointerExceptionClass     = staticClass("java.lang.NullPointerException")
-  val IllegalArgumentExceptionClass = staticClass("java.lang.IllegalArgumentException")
+  val RegionModule       = staticModule("scala.offheap.Region")
+  val PoolRegionModule   = staticModule("scala.offheap.PoolRegion")
+  val DirectRegionModule = staticModule("scala.offheap.DirectRegion")
+  val PoolModule         = staticModule("scala.offheap.Pool")
+  val ArrayModule        = staticModule("scala.offheap.Array")
+  val EmbedArrayModule   = staticModule("scala.offheap.EmbedArray")
+  val MemoryModule       = staticModule("scala.offheap.Memory")
+  val SanitizerModule    = staticModule("scala.offheap.internal.Sanitizer")
+  val MethodModule       = staticModule("scala.offheap.internal.Method")
+  val LayoutModule       = staticModule("scala.offheap.internal.Layout")
+  val CheckedModule      = staticModule("scala.offheap.internal.Checked")
 
-  val RegionClass             = staticClass(s"$prefix.Region")
-  val RefClass                = staticClass(s"$prefix.Ref")
-  val MemoryClass             = staticClass(s"$prefix.Memory")
-  val NativeMemoryClass       = staticClass(s"$prefix.NativeMemory")
-  val ArrayClass              = staticClass(s"$prefix.Array")
-  val DataClass               = staticClass("offheap.internal.Data")
-  val EnumClass               = staticClass("offheap.internal.Enum")
-  val LayoutClass             = staticClass("offheap.internal.Layout")
-  val TagClass                = staticClass("offheap.internal.Tag")
-  val ClassTagClass           = staticClass("offheap.internal.ClassTag")
-  val ClassTagRangeClass      = staticClass("offheap.internal.ClassTagRange")
-  val ParentClass             = staticClass("offheap.internal.Parent")
-  val PrimaryExtractorClass   = staticClass("offheap.internal.PrimaryExtractor")
-  val ParentExtractorClass    = staticClass("offheap.internal.ParentExractor")
-  val UniversalExtractorClass = staticClass("offheap.internal.UniversalExtractor")
+  val offheap  = staticPackage("scala.offheap")
+  val internal = staticPackage("scala.offheap.internal")
 
-  val MethodModule  = staticModule("offheap.internal.Method")
-  val PoolModule    = staticModule(s"$prefix.Pool")
-  val ArrayModule   = staticModule(s"$prefix.Array")
-  val MemoryModule  = staticModule(s"$prefix.Memory")
+  val AddrTpe      = LongTpe
+  val SizeTpe      = LongTpe
+  val ArrayTpe     = ArrayClass.toType
+  val ArraySizeTpe = IntTpe
 
-  val offheap  = staticPackage("offheap")
-  val internal = staticPackage("offheap.internal")
-
-  val initialize   = TermName("$initialize")
+  val initializer  = TermName("$init")
+  val layout       = TermName("$layout")
   val tag          = TermName("$tag")
-  val ref          = TermName("$ref")
   val canUseMacros = TermName("$canUseMacros")
+  val complete     = TermName("$complete")
 }
